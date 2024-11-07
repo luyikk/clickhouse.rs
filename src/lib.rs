@@ -226,13 +226,13 @@ impl Client {
     ///
     /// # Panics
     /// If `T` has unnamed fields, e.g. tuples.
-    pub fn insert<T: Row>(&self, table: &str) -> Result<insert::Insert<T>> {
+    pub fn insert(&self, table: &str) -> Result<insert::Insert> {
         insert::Insert::new(self, table)
     }
 
     /// Creates an inserter to perform multiple INSERTs.
     #[cfg(feature = "inserter")]
-    pub fn inserter<T: Row>(&self, table: &str) -> Result<inserter::Inserter<T>> {
+    pub fn inserter(&self, table: &str) -> Result<inserter::Inserter> {
         inserter::Inserter::new(self, table)
     }
 

@@ -132,7 +132,7 @@ async fn empty_insert() {
     create_simple_table(&client, table_name).await;
 
     let insert = client
-        .insert::<SimpleRow>(table_name)
+        .insert(table_name)
         .unwrap()
         .with_option("query_id", &query_id);
 

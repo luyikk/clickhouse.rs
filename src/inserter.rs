@@ -16,14 +16,14 @@ use crate::{error::Result, insert::Insert, row::Row, ticks::Ticks, Client};
 /// All rows written by [`Inserter::write()`] between [`Inserter::commit()`]
 /// calls are sent in one `INSERT` statement.
 #[must_use]
-pub struct Inserter<T> {
+pub struct Inserter {
     client: Client,
     table: String,
     max_bytes: u64,
     max_rows: u64,
     send_timeout: Option<Duration>,
     end_timeout: Option<Duration>,
-    insert: Option<Insert<T>>,
+    insert: Option<Insert>,
     ticks: Ticks,
     pending: Quantities,
     in_transaction: bool,
@@ -49,10 +49,7 @@ impl Quantities {
     };
 }
 
-impl<T> Inserter<T>
-where
-    T: Row,
-{
+impl Inserter {
     pub(crate) fn new(client: &Client, table: &str) -> Result<Self> {
         Ok(Self {
             client: client.clone(),
@@ -197,9 +194,9 @@ where
     /// # Panics
     /// If called after the previous call that returned an error.
     #[inline]
-    pub fn write(&mut self, row: &T) -> Result<()>
+    pub fn write<T>(&mut self, row: &T) -> Result<()>
     where
-        T: Serialize,
+        T: Serialize + Row,
     {
         if self.insert.is_none() {
             self.init_insert()?;
@@ -272,7 +269,7 @@ where
         debug_assert!(self.insert.is_none());
         debug_assert_eq!(self.pending, Quantities::ZERO);
 
-        let mut new_insert: Insert<T> = self.client.insert(&self.table)?;
+        let mut new_insert: Insert = self.client.insert(&self.table)?;
         new_insert.set_timeouts(self.send_timeout, self.end_timeout);
         self.insert = Some(new_insert);
         Ok(())

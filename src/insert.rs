@@ -1,4 +1,4 @@
-use std::{future::Future, marker::PhantomData, mem, panic, pin::Pin, time::Duration};
+use std::{future::Future, mem, panic, pin::Pin, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use hyper::{self, Request};
@@ -34,7 +34,7 @@ const_assert!(BUFFER_SIZE.is_power_of_two()); // to use the whole buffer's capac
 ///
 /// Rows are being sent progressively to spread network load.
 #[must_use]
-pub struct Insert<T> {
+pub struct Insert {
     state: InsertState,
     buffer: BytesMut,
     #[cfg(feature = "lz4")]
@@ -44,13 +44,13 @@ pub struct Insert<T> {
     // Use boxed `Sleep` to reuse a timer entry, it improves performance.
     // Also, `tokio::time::timeout()` significantly increases a future's size.
     sleep: Pin<Box<Sleep>>,
-    _marker: PhantomData<fn() -> T>, // TODO: test contravariance.
 }
 
 enum InsertState {
     NotStarted {
         client: Box<Client>,
-        sql: String,
+        sql: Option<String>,
+        table: String,
     },
     Active {
         sender: ChunkSender,
@@ -79,7 +79,11 @@ impl InsertState {
 
     fn client_with_sql(&self) -> Option<(&Client, &str)> {
         match self {
-            InsertState::NotStarted { client, sql } => Some((client, sql)),
+            InsertState::NotStarted {
+                client,
+                sql: Some(sql),
+                ..
+            } => Some((client, sql)),
             _ => None,
         }
     }
@@ -95,9 +99,13 @@ impl InsertState {
     fn with_option(&mut self, name: impl Into<String>, value: impl Into<String>) {
         assert!(matches!(self, InsertState::NotStarted { .. }));
         replace_with_or_abort(self, |_self| match _self {
-            InsertState::NotStarted { mut client, sql } => {
+            InsertState::NotStarted {
+                mut client,
+                sql,
+                table,
+            } => {
                 client.add_option(name, value);
-                InsertState::NotStarted { client, sql }
+                InsertState::NotStarted { client, sql, table }
             }
             _ => unreachable!(),
         });
@@ -118,23 +126,14 @@ macro_rules! timeout {
     }};
 }
 
-impl<T> Insert<T> {
+impl Insert {
     // TODO: remove Result
-    pub(crate) fn new(client: &Client, table: &str) -> Result<Self>
-    where
-        T: Row,
-    {
-        let fields = row::join_column_names::<T>()
-            .expect("the row type must be a struct or a wrapper around it");
-
-        // TODO: what about escaping a table name?
-        // https://clickhouse.com/docs/en/sql-reference/syntax#identifiers
-        let sql = format!("INSERT INTO {}({}) FORMAT RowBinary", table, fields);
-
+    pub(crate) fn new(client: &Client, table: &str) -> Result<Self> {
         Ok(Self {
             state: InsertState::NotStarted {
                 client: Box::new(client.clone()),
-                sql,
+                table: table.to_string(),
+                sql: None,
             },
             buffer: BytesMut::with_capacity(BUFFER_SIZE),
             #[cfg(feature = "lz4")]
@@ -142,7 +141,6 @@ impl<T> Insert<T> {
             send_timeout: None,
             end_timeout: None,
             sleep: Box::pin(tokio::time::sleep(Duration::new(0, 0))),
-            _marker: PhantomData,
         })
     }
 
@@ -206,9 +204,9 @@ impl<T> Insert<T> {
     ///
     /// # Panics
     /// If called after the previous call that returned an error.
-    pub fn write<'a>(&'a mut self, row: &T) -> impl Future<Output = Result<()>> + 'a + Send
+    pub fn write<'a, T>(&'a mut self, row: &T) -> impl Future<Output = Result<()>> + 'a + Send
     where
-        T: Serialize,
+        T: Serialize + Row,
     {
         let result = self.do_write(row);
 
@@ -222,12 +220,23 @@ impl<T> Insert<T> {
     }
 
     #[inline(always)]
-    pub(crate) fn do_write(&mut self, row: &T) -> Result<usize>
+    pub(crate) fn do_write<T>(&mut self, row: &T) -> Result<usize>
     where
-        T: Serialize,
+        T: Serialize + Row,
     {
-        match self.state {
-            InsertState::NotStarted { .. } => self.init_request(),
+        match &mut self.state {
+            InsertState::NotStarted { table, sql, .. } => {
+                if sql.is_none() {
+                    let fields = row::join_column_names::<T>()
+                        .expect("the row type must be a struct or a wrapper around it");
+
+                    // TODO: what about escaping a table name?
+                    // https://clickhouse.com/docs/en/sql-reference/syntax#identifiers
+                    let sql_cmd = format!("INSERT INTO {}({}) FORMAT RowBinary", table, fields);
+                    *sql = Some(sql_cmd);
+                }
+                self.init_request()
+            }
             InsertState::Active { .. } => Ok(()),
             _ => panic!("write() after error"),
         }?;
@@ -384,7 +393,7 @@ impl<T> Insert<T> {
     }
 }
 
-impl<T> Drop for Insert<T> {
+impl Drop for Insert {
     fn drop(&mut self) {
         self.abort();
     }
